@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RISC-V CSR & Debug Analysis Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- pako: GZIP compression for sharing URL -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111827; /* bg-gray-900 */
+            color: #d1d5db; /* text-gray-300 */
+        }
+        details > summary {
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+            background-color: #1f2937; /* bg-gray-800 */
+            border-radius: 0.375rem;
+            transition: background-color 0.2s;
+            list-style: none; /* Remove default marker */
+        }
+        details > summary::-webkit-details-marker { display: none; } /* Chrome/Safari */
+        details > summary::before { content: '► '; margin-right: 0.5rem; }
+        details[open] > summary::before { content: '▼ '; }
+        details > summary:hover { background-color: #374151; }
+        details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+        .details-content { padding: 1rem; border: 1px solid #374151; border-top: none; border-bottom-left-radius: 0.375rem; border-bottom-right-radius: 0.375rem; }
+        .bit-viz { display: flex; flex-wrap: wrap; gap: 1px; padding: 2px; background-color: #374151; border-radius: 4px; }
+        .bit-box { width: 18px; height: 18px; font-size: 10px; line-height: 18px; text-align: center; position: relative; cursor: default; font-family: 'monospace'; font-weight: bold; }
+        .bit-box.one { background-color: #34d399; color: #111827; }
+        .bit-box.zero { background-color: #4b5563; color: #d1d5db; }
+        .bit-box .tooltip { visibility: hidden; width: 240px; background-color: #1f2937; color: #fff; text-align: left; border-radius: 6px; padding: 8px; position: absolute; z-index: 10; bottom: 125%; left: 50%; margin-left: -120px; opacity: 0; transition: opacity 0.3s; font-size: 12px; line-height: 1.5; pointer-events: none; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border: 1px solid #4b5563; }
+        .bit-box:hover .tooltip { visibility: visible; opacity: 1; }
+        .note-box { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; margin-top: 1rem; border-left-width: 4px; border-radius: 4px; font-size: 0.875rem; }
+        .note-error { background-color: rgba(239, 68, 68, 0.1); border-color: #ef4444; color: #fca5a5; }
+        .note-warn { background-color: rgba(245, 158, 11, 0.1); border-color: #f59e0b; color: #fcd34d; }
+        .note-info { background-color: rgba(59, 130, 246, 0.1); border-color: #3b82f6; color: #93c5fd; }
+        .note-success { background-color: rgba(16, 185, 129, 0.1); border-color: #10b981; color: #6ee7b7; }
+        .code-block { background-color: #1f2937; border-radius: 0.5rem; padding: 1rem; font-family: 'monospace'; font-size: 0.875rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+        .highlight-line { background-color: rgba(59, 130, 246, 0.2); border-left: 2px solid #3b82f6; margin-left: -1rem; padding-left: calc(1rem - 2px); }
+        .gpr-highlight { color: #6ee7b7; font-weight: bold; }
+        .share-notification { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: #10b981; color: white; padding: 10px 20px; border-radius: 5px; z-index: 100; opacity: 0; transition: opacity 0.5s; }
+    </style>
+</head>
+<body class="antialiased">
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-white">RISC-V CSR & Debug Analysis Tool</h1>
+            <p class="mt-2 text-gray-400">Paste your XSDB dump to comprehensively analyze the processor state.</p>
+            <p class="mt-1 text-sm text-gray-500">Supported commands: `rrd`, `rrd csr`, `bt`, `dis`, `mrd`</p>
+        </header>
+
+        <main>
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                <label for="input-area" class="block text-lg font-medium text-gray-200 mb-2">XSDB Dump Input</label>
+                <textarea id="input-area" rows="18" class="w-full p-3 bg-gray-900 border border-gray-600 rounded-md text-gray-300 font-mono text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition" placeholder="Paste output from 'rrd', 'bt', 'dis', 'mrd', etc. here..."></textarea>
+                <div class="flex gap-4 mt-4">
+                    <button id="parse-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition duration-300 ease-in-out transform hover:scale-105">
+                        Analyze (Ctrl+Enter)
+                    </button>
+                    <button id="share-btn" class="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-4 rounded-md transition duration-300 ease-in-out transform hover:scale-105">
+                        Share via URL
+                    </button>
+                </div>
+            </div>
+
+            <div id="results-container" class="mt-8"></div>
+        </main>
+        
+        <div id="share-notification" class="share-notification">Shareable URL copied to clipboard!</div>
+
+        <footer class="text-center mt-12 text-gray-500 text-sm">
+            <p>RISC-V CSR & Debug Analysis Tool v6</p>
+        </footer>
+    </div>
+
+    <script>
+        // --- Definition Databases ---
+        const CSR_DEFINITIONS = { mstatus: { shortName: "mstatus", name: "Machine Status Register", doc: "Holds the current status of the processor. Controls interrupt enables, privilege levels, and other states.", fields: [ { bits: [0], name: "UIE", desc: "User Interrupt Enable" }, { bits: [1], name: "SIE", desc: "Supervisor Interrupt Enable" }, { bits: [3], name: "MIE", desc: "Machine Interrupt Enable" }, { bits: [4], name: "UPIE", desc: "User Previous Interrupt Enable" }, { bits: [5], name: "SPIE", desc: "Supervisor Previous Interrupt Enable" }, { bits: [7], name: "MPIE", desc: "Machine Previous Interrupt Enable" }, { bits: [8], name: "SPP", desc: "Supervisor Previous Privilege", values: { 0: "User", 1: "Supervisor" } }, { bits: [11, 12], name: "MPP", desc: "Machine Previous Privilege", values: { 0: "User", 1: "Supervisor", 3: "Machine" } }, { bits: [13, 14], name: "FS", desc: "Floating-point Status", values: { 0: "Off", 1: "Initial", 2: "Clean", 3: "Dirty" } }, { bits: [15, 16], name: "XS", desc: "Extension Status", values: { 0: "Off", 1: "Initial", 2: "Clean", 3: "Dirty" } }, { bits: [17], name: "MPRV", desc: "Modify Privilege (memory accesses by load/store are performed with privilege level in MPP)" }, { bits: [18], name: "SUM", desc: "Permit Supervisor User Memory access" }, { bits: [19], name: "MXR", desc: "Make eXecutable Readable" }, { bits: [20], name: "TVM", desc: "Trap Virtual Memory" }, { bits: [21], name: "TW", desc: "Timeout Wait" }, { bits: [22], name: "TSR", desc: "Trap SRET" }, { bits: [31], name: "SD", desc: "Something Dirty (FS, XS, or SUM is dirty)" }, ] }, misa: { shortName: "misa", name: "Machine ISA Register", doc: "Describes the supported Instruction Set Architecture.", fields: [ { bits: [0, 25], name: "Extensions", desc: "Supported extensions (A-Z)" }, { bits: [30, 31], name: "MXL", desc: "Machine XLEN", values: { 1: "RV32", 2: "RV64", 3: "RV128" } } ] }, mie: { shortName: "mie", name: "Machine Interrupt Enable", doc: "Controls which interrupts are enabled at the machine level.", fields: [ { bits: [0], name: "USIE", desc: "User Software IE" }, { bits: [1], name: "SSIE", desc: "Supervisor Software IE" }, { bits: [3], name: "MSIE", desc: "Machine Software IE" }, { bits: [4], name: "UTIE", desc: "User Timer IE" }, { bits: [5], name: "STIE", desc: "Supervisor Timer IE" }, { bits: [7], name: "MTIE", desc: "Machine Timer IE" }, { bits: [8], name: "UEIE", desc: "User External IE" }, { bits: [9], name: "SEIE", desc: "Supervisor External IE" }, { bits: [11], name: "MEIE", desc: "Machine External IE" }, ] }, mip: { shortName: "mip", name: "Machine Interrupt Pending", doc: "Indicates which interrupts are currently pending.", fields: [ { bits: [0], name: "USIP", desc: "User Software IP" }, { bits: [1], name: "SSIP", desc: "Supervisor Software IP" }, { bits: [3], name: "MSIP", desc: "Machine Software IP" }, { bits: [4], name: "UTIP", desc: "User Timer IP" }, { bits: [5], name: "STIP", desc: "Supervisor Timer IP" }, { bits: [7], name: "MTIP", desc: "Machine Timer IP" }, { bits: [8], name: "UEIP", desc: "User External IP" }, { bits: [9], name: "SEIP", desc: "Supervisor External IP" }, { bits: [11], name: "MEIP", desc: "Machine External IP" }, ] }, mtvec: { shortName: "mtvec", name: "Machine Trap-Vector Base-Address Register", doc: "Sets the address of the machine-mode trap handler.", fields: [ { bits: [0, 1], name: "MODE", desc: "Vector Mode", values: { 0: "Direct", 1: "Vectored" } }, { bits: [2, 31], name: "BASE", desc: "Base address of trap handler (must be 4-byte aligned)" } ] }, mcause: { shortName: "mcause", name: "Machine Cause Register", doc: "Indicates the reason for the last trap (exception or interrupt).", fields: [ { bits: [0, 30], name: "Exception Code", desc: "Exception or Interrupt Code" }, { bits: [31], name: "Interrupt", desc: "Trap Type", values: { 0: "Exception", 1: "Interrupt" } } ] }, mepc: { shortName: "mepc", name: "Machine Exception Program Counter", doc: "Holds the instruction address where the trap occurred." }, mtval: { shortName: "mtval", name: "Machine Trap Value", doc: "Holds extra information about the trap (e.g., faulting address or instruction)." }, mscratch: { shortName: "mscratch", name: "Machine Scratch Register", doc: "Scratch register for use by the machine-mode trap handler." }, pmpcfg0: { shortName: "pmpcfg0", name: "Physical Memory Protection Cfg 0", doc: "Configuration for PMP entries 0-3 (RV32) or 0-7 (RV64).", type: 'pmpcfg' }, pmpcfg1: { shortName: "pmpcfg1", name: "Physical Memory Protection Cfg 1", doc: "Configuration for PMP entries 4-7 (RV32).", type: 'pmpcfg' }, pmpcfg2: { shortName: "pmpcfg2", name: "Physical Memory Protection Cfg 2", doc: "Configuration for PMP entries 8-11 (RV32) or 8-15 (RV64).", type: 'pmpcfg' }, pmpcfg3: { shortName: "pmpcfg3", name: "Physical Memory Protection Cfg 3", doc: "Configuration for PMP entries 12-15 (RV32).", type: 'pmpcfg' }, pmpaddr0: { shortName: "pmpaddr0", name: "Physical Memory Protection Address 0", doc: "Address for PMP entry 0." }, pmpaddr1: { shortName: "pmpaddr1", name: "PMP Address 1", doc: "Address for PMP entry 1." }, pmpaddr2: { shortName: "pmpaddr2", name: "PMP Address 2", doc: "Address for PMP entry 2." }, pmpaddr3: { shortName: "pmpaddr3", name: "PMP Address 3", doc: "Address for PMP entry 3." }, pmpaddr4: { shortName: "pmpaddr4", name: "PMP Address 4", doc: "Address for PMP entry 4." }, pmpaddr5: { shortName: "pmpaddr5", name: "PMP Address 5", doc: "Address for PMP entry 5." }, pmpaddr6: { shortName: "pmpaddr6", name: "PMP Address 6", doc: "Address for PMP entry 6." }, pmpaddr7: { shortName: "pmpaddr7", name: "PMP Address 7", doc: "Address for PMP entry 7." }, pmpaddr8: { shortName: "pmpaddr8", name: "PMP Address 8", doc: "Address for PMP entry 8." }, pmpaddr9: { shortName: "pmpaddr9", name: "PMP Address 9", doc: "Address for PMP entry 9." }, pmpaddr10: { shortName: "pmpaddr10", name: "PMP Address 10", doc: "Address for PMP entry 10." }, pmpaddr11: { shortName: "pmpaddr11", name: "PMP Address 11", doc: "Address for PMP entry 11." }, pmpaddr12: { shortName: "pmpaddr12", name: "PMP Address 12", doc: "Address for PMP entry 12." }, pmpaddr13: { shortName: "pmpaddr13", name: "PMP Address 13", doc: "Address for PMP entry 13." }, pmpaddr14: { shortName: "pmpaddr14", name: "PMP Address 14", doc: "Address for PMP entry 14." }, pmpaddr15: { shortName: "pmpaddr15", name: "PMP Address 15", doc: "Address for PMP entry 15." }, dcsr: { shortName: "dcsr", name: "Debug Control and Status Register", doc: "Controls and describes the status of the debug mode.", fields: [ { bits: [0,1], name: "prv", desc: "Privilege level before entering Debug Mode", values: {0: "User", 1: "Supervisor", 3: "Machine"}}, { bits: [2], name: "step", desc: "Enable single-stepping" }, { bits: [3], name: "nmip", desc: "Enter debug mode on NMI instead of halting" }, { bits: [6, 8], name: "cause", desc: "Reason for entering Debug Mode", values: {1: "ebreak", 2: "Trigger module", 3: "Debug interrupt", 4: "Step"}}, { bits: [9], name: "stoptime", desc: "Timers stop in Debug Mode"}, { bits: [10], name: "stopcount", desc: "Counters stop in Debug Mode"}, { bits: [12], name: "ebreaku", desc: "EBREAK in U-mode enters Debug Mode" }, { bits: [13], name: "ebreaks", desc: "EBREAK in S-mode enters Debug Mode" }, { bits: [15], name: "ebreakm", desc: "EBREAK in M-mode enters Debug Mode" }, { bits: [28, 31], name: "xdebugver", desc: "External debug support version", values: {0: "None", 1: "v0.13", 4: "v1.0"}} ] }, dpc: { shortName: "dpc", name: "Debug PC", doc: "Holds the PC value at the time of entering debug mode." }, mvendorid: { shortName: "mvendorid", name: "Vendor ID", doc: "JEDEC vendor ID. 0 if not implemented." }, marchid: { shortName: "marchid", name: "Architecture ID", doc: "Microarchitecture ID." }, mimpid: { shortName: "mimpid", name: "Implementation ID", doc: "Hardware implementation ID." }, mhartid: { shortName: "mhartid", name: "Hardware Thread ID", doc: "ID of the current hardware thread (hart)." }, };
+        const EXCEPTION_CODES = { 0: "Instruction address misaligned", 1: "Instruction access fault", 2: "Illegal instruction", 3: "Breakpoint", 4: "Load address misaligned", 5: "Load access fault", 6: "Store/AMO address misaligned", 7: "Store/AMO access fault", 8: "Environment call from U-mode", 9: "Environment call from S-mode", 11: "Environment call from M-mode", 12: "Instruction page fault", 13: "Load page fault", 15: "Store/AMO page fault" };
+        const INTERRUPT_CODES = { 0: "User software interrupt", 1: "Supervisor software interrupt", 3: "Machine software interrupt", 4: "User timer interrupt", 5: "Supervisor timer interrupt", 7: "Machine timer interrupt", 8: "User external interrupt", 9: "Supervisor external interrupt", 11: "Machine external interrupt" };
+        const PMP_A_MODES = { 0: "OFF", 1: "TOR", 2: "NA4", 3: "NAPOT" };
+        const GPR_ORDER = [ 'zero', 'ra', 'sp', 'gp', 'tp', 't0', 't1', 't2', 's0', 's1', 'a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6', 'pc', 'priv' ];
+        const CSR_GROUPS = {
+            'Trap Handling': ['mstatus', 'mepc', 'mcause', 'mtval', 'mtvec', 'mscratch'],
+            'Interrupts': ['mie', 'mip'],
+            'Debug': ['dcsr', 'dpc', 'tselect', 'tdata1', 'tdata2', 'tdata3'],
+            'Platform Info': ['misa', 'mvendorid', 'marchid', 'mimpid', 'mhartid'],
+        };
+
+        // --- Main Application Logic ---
+        const parseBtn = document.getElementById('parse-btn');
+        const shareBtn = document.getElementById('share-btn');
+        const inputArea = document.getElementById('input-area');
+        const resultsContainer = document.getElementById('results-container');
+        const shareNotification = document.getElementById('share-notification');
+
+        parseBtn.addEventListener('click', parseAndRender);
+        inputArea.addEventListener('keydown', (e) => { if (e.ctrlKey && (e.key === 'Enter' || e.keyCode === 13)) { e.preventDefault(); parseAndRender(); } });
+        shareBtn.addEventListener('click', shareUrl);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const data = urlParams.get('data');
+            if (data) {
+                try {
+                    const compressed = Uint8Array.from(atob(data.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+                    const decompressed = pako.inflate(compressed, { to: 'string' });
+                    inputArea.value = decompressed;
+                } catch (e) {
+                    console.error("Failed to decode URL data:", e);
+                    inputArea.value = "Failed to load data from URL.";
+                }
+            }
+            if(!inputArea.value) {
+                inputArea.value = `xsdb% Info: Hart #0 (target 6) Running
+Info: Hart #0 (target 6) Stopped at 0x0 (Suspended)
+xsdb% Info: Hart #0 (target 6) Running
+xsdb% Info: Hart #0 (target 6) Stopped at 0x0 (Step)
+xsdb% rrd
+zero: 00000000    ra: 00000000    sp: 00000000    gp: 00000000    tp: 00000000
+  t0: 00000000    t1: 00000000    t2: 00000000    s0: 00000000    s1: 00000000
+  a0: 00000000    a1: 00000000    a2: 00000000    a3: 00000000    a4: 00000000
+  a5: 00000000    a6: 00000000    a7: 00000000    s2: 00000000    s3: 00000000
+  s4: 00000000    s5: 00000000    s6: 00000000    s7: 00000000    s8: 00000000
+  s9: 00000000   s10: 00000000   s11: 00000000    t3: 00000000    t4: 00000000
+  t5: 00000000    t6: 00000000    pc: 00000000   priv:           03    csr
+
+xsdb% rrd csr
+  mstatus: 00001800        misa: 40001104         mie: 00000000
+    mtvec: 00000004    mscratch: 00000000        mepc: 00000000
+   mcause: 0000000b       mtval: 00000000         mip: 00000000
+  pmpcfg0: 0000000f     pmpcfg1: 20000004     pmpcfg2: 00000000
+  pmpcfg3: 00000000    pmpaddr0: 00000000    pmpaddr1: 00000000
+ pmpaddr2: 00000000    pmpaddr3: 00000000    pmpaddr4: 00000000
+ pmpaddr5: 00000000    pmpaddr6: 00000000    pmpaddr7: 00000000
+ pmpaddr8: 00000000    pmpaddr9: 00000000   pmpaddr10: 00000000
+pmpaddr11: 00000000  pmpaddr12: 00000000  pmpaddr13: 00000000
+pmpaddr14: 00000000  pmpaddr15: 00000000     tselect: 00000000
+    tdata1: 20000004      tdata2: 00000000      tdata3: 00000000
+     tinfo: 00000005    tcontrol: 00000000    mcontext: 00000000
+      dcsr: 40008707         dpc: 00000000   mvendorid: 00000049
+   marchid: 00000001       mimpid: 00000001     mhartid: 00000000
+
+xsdb% bt
+    0  0x0
+xsdb% dis
+00000000: auipc   t0, 0x1
+
+xsdb% mrd 0xc0000000 64
+C0000000:   00000000
+C0000004:   00000000
+C0000008:   00000000
+C000000C:   00000000`;
+            }
+            parseAndRender();
+        });
+        
+        function parseAndRender() {
+            const text = inputArea.value;
+            if (!text.trim()) { resultsContainer.innerHTML = `<p class="text-center text-yellow-400">Input is empty.</p>`; return; }
+            try { const parsedData = parseInput(text); renderResults(parsedData); } 
+            catch (error) { console.error("Parsing Error:", error); resultsContainer.innerHTML = `<p class="text-center text-red-400">Failed to parse input. Please check the format.</p>`; }
+        }
+
+        function parseInput(text) {
+            const data = { registers: {}, backtrace: [], disassembly: [], memoryDump: [], statusLines: [] };
+            const commandRegex = /xsdb% ([\s\S]*?)(?=xsdb%|$)/g;
+            let match;
+            while ((match = commandRegex.exec(text)) !== null) {
+                const block = match[1].trim();
+                const firstLine = block.split('\n')[0].trim();
+                const content = block.substring(firstLine.length).trim();
+                
+                if (firstLine.startsWith('rrd')) {
+                    const regRegex = /(\w+):\s+([0-9a-fA-F]+)/g;
+                    let regMatch;
+                    while ((regMatch = regRegex.exec(block)) !== null) { data.registers[regMatch[1]] = regMatch[2]; }
+                } else if (firstLine.startsWith('bt')) {
+                    data.backtrace = content.split('\n').map(line => line.trim()).filter(Boolean);
+                } else if (firstLine.startsWith('dis')) {
+                    data.disassembly = content.split('\n').map(line => line.trim()).filter(Boolean);
+                } else if (firstLine.startsWith('mrd')) {
+                    const memRegex = /^([0-9a-fA-F]+):\s+([0-9a-fA-F]+)/gm;
+                    let memMatch;
+                    while((memMatch = memRegex.exec(content)) !== null) {
+                        data.memoryDump.push({address: memMatch[1], value: memMatch[2]});
+                    }
+                }
+            }
+            data.statusLines = text.split('\n').filter(line => line.startsWith('Info: Hart'));
+            return data;
+        }
+
+        function renderResults(data) {
+            resultsContainer.innerHTML = '';
+            renderSummary(data);
+
+            const gpr = {}; const csr = {}; const pmp = { cfgs: {}, addrs: {} };
+            for (const [key, value] of Object.entries(data.registers)) {
+                if (GPR_ORDER.includes(key)) { gpr[key] = value; } 
+                else if (key.startsWith('pmpcfg')) { pmp.cfgs[key] = value; }
+                else if (key.startsWith('pmpaddr')) { pmp.addrs[key] = value; }
+                else if (CSR_DEFINITIONS[key]) { csr[key] = value; }
+                else { gpr[key] = value; } // Put unknown registers in GPR section
+            }
+
+            const contextGrid = document.createElement('div');
+            contextGrid.className = "grid md:grid-cols-2 gap-6 mb-8";
+            if (data.disassembly.length > 0) contextGrid.appendChild(createDisassemblyCard(data));
+            if (data.backtrace.length > 0) contextGrid.appendChild(createBacktraceCard(data.backtrace));
+            if (data.memoryDump.length > 0) contextGrid.appendChild(createMemoryDumpCard(data.memoryDump));
+            if (contextGrid.hasChildNodes()) resultsContainer.appendChild(contextGrid);
+
+            if (Object.keys(gpr).length > 0) { resultsContainer.appendChild(createSection('General Purpose Registers', createGprGrid(gpr))); }
+            
+            if (Object.keys(pmp.cfgs).length > 0) {
+                const pmpSection = createSection('Physical Memory Protection (PMP)', createPmpVisualization(pmp));
+                const pmpDetails = document.createElement('details');
+                pmpDetails.className = "mt-4";
+                pmpDetails.innerHTML = `<summary class="text-lg font-bold">PMP Register Details</summary><div class="details-content space-y-4"></div>`;
+                const pmpContent = pmpDetails.querySelector('.details-content');
+                Object.entries({...pmp.cfgs, ...pmp.addrs}).sort((a,b) => a[0].localeCompare(b[0])).forEach(([name, value]) => {
+                    const analysis = analyzeCsr(name, value); if (analysis) pmpContent.appendChild(createCsrCard(analysis));
+                });
+                pmpSection.appendChild(pmpDetails);
+                resultsContainer.appendChild(pmpSection);
+            }
+
+            const groupedCSRs = {}; const ungroupedCSRs = {};
+            Object.keys(csr).forEach(key => {
+                let found = false;
+                for (const groupName in CSR_GROUPS) {
+                    if (CSR_GROUPS[groupName].includes(key)) {
+                        if (!groupedCSRs[groupName]) groupedCSRs[groupName] = {};
+                        groupedCSRs[groupName][key] = csr[key];
+                        found = true; break;
+                    }
+                }
+                if (!found) ungroupedCSRs[key] = csr[key];
+            });
+
+            const csrSection = createSection('Control & Status Registers (CSRs)');
+            Object.entries(groupedCSRs).forEach(([groupName, regs]) => {
+                const groupDetails = document.createElement('details');
+                groupDetails.className = "mb-4";
+                groupDetails.innerHTML = `<summary class="text-lg font-bold">${groupName}</summary><div class="details-content space-y-4"></div>`;
+                const groupContent = groupDetails.querySelector('.details-content');
+                Object.entries(regs).sort((a,b) => a[0].localeCompare(b[0])).forEach(([name, value]) => {
+                    const analysis = analyzeCsr(name, value); if (analysis) groupContent.appendChild(createCsrCard(analysis));
+                });
+                csrSection.appendChild(groupDetails);
+            });
+            if(Object.keys(ungroupedCSRs).length > 0) {
+                Object.entries(ungroupedCSRs).sort((a,b) => a[0].localeCompare(b[0])).forEach(([name, value]) => {
+                    const analysis = analyzeCsr(name, value); if (analysis) csrSection.appendChild(createCsrCard(analysis));
+                });
+            }
+            if (csrSection.hasChildNodes()) resultsContainer.appendChild(csrSection);
+        }
+
+        function renderSummary(data) { const summaryContainer = document.createElement('div'); summaryContainer.className = "mb-8"; const { registers, statusLines } = data; let summaryNote = null; if (registers.mcause && BigInt('0x' + registers.mcause) !== 0n) { const mcauseVal = BigInt('0x' + registers.mcause); const bitLength = Math.max(32, registers.mcause.length * 4); const isInterrupt = (mcauseVal >> BigInt(bitLength - 1)) & 1n; const code = mcauseVal & ((1n << BigInt(bitLength - 1)) - 1n); const causeText = isInterrupt ? (INTERRUPT_CODES[Number(code)] || `Custom Interrupt (${code})`) : (EXCEPTION_CODES[Number(code)] || `Custom Exception (${code})`); const pc = registers.mepc || registers.pc || 'N/A'; summaryNote = { level: isInterrupt ? 'warn' : 'error', message: `<strong>Status: ${isInterrupt ? 'Interrupt' : 'Exception'} Occurred</strong><br>${causeText} @ PC=0x${pc}` }; } else if (registers.dcsr) { const dcsrVal = BigInt('0x' + registers.dcsr); const cause = (dcsrVal >> 6n) & 7n; if (cause !== 0n) { const causeMap = {1: "ebreak", 2: "Trigger module", 3: "Debug interrupt", 4: "Step"}; const pc = registers.dpc || registers.pc || 'N/A'; summaryNote = { level: 'info', message: `<strong>Status: Halted in Debug Mode</strong><br>Reason: ${causeMap[Number(cause)] || 'Unknown'} @ PC=0x${pc}` }; } } if (!summaryNote) { const lastStatus = statusLines.length > 0 ? statusLines[statusLines.length - 1] : "Info: Unknown State"; const pc = registers.pc || 'N/A'; if (lastStatus.includes("Stopped") || lastStatus.includes("Suspended")) { summaryNote = { level: 'info', message: `<strong>Status: Halted</strong><br>${lastStatus.split(')').slice(1).join(' ').trim()} @ PC=0x${pc}`}; } else { summaryNote = { level: 'success', message: `<strong>Status: Running</strong><br>Last known PC=0x${pc}`}; } } summaryContainer.innerHTML = `<div class="note-box note-${summaryNote.level}">${summaryNote.message}</div>`; resultsContainer.appendChild(summaryContainer); }
+        function createDisassemblyCard(data) { const card = document.createElement('div'); card.innerHTML = `<h3 class="text-xl font-bold text-white mb-2">Disassembly</h3><div class="code-block">${ data.disassembly.map(line => { const addr = line.split(':')[0].trim(); const pc = data.registers.pc || ''; const mepc = data.registers.mepc || ''; const highlight = (pc && addr === pc.slice(-addr.length)) || (mepc && addr === mepc.slice(-addr.length)); return `<div class="${highlight ? 'highlight-line' : ''}">${line}</div>`; }).join('') }</div>`; return card; }
+        function createBacktraceCard(backtrace) { const card = document.createElement('div'); card.innerHTML = `<h3 class="text-xl font-bold text-white mb-2">Backtrace</h3><div class="code-block">${backtrace.join('\n')}</div>`; return card; }
+        function createMemoryDumpCard(memoryDump) { const card = document.createElement('div'); card.className = "md:col-span-2"; card.innerHTML = `<h3 class="text-xl font-bold text-white mb-2">Memory Dump</h3><div class="code-block grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1">${ memoryDump.map(mem => `<div><span class="text-gray-500">${mem.address}:</span> ${mem.value}</div>`).join('') }</div>`; return card; }
+        function createSection(title, contentElement) { const section = document.createElement('div'); section.className = 'mb-8'; const titleEl = document.createElement('h2'); titleEl.className = 'text-2xl font-bold text-white border-b-2 border-gray-600 pb-2 mb-4'; titleEl.textContent = title; section.appendChild(titleEl); if(contentElement) section.appendChild(contentElement); return section; }
+        function analyzeCsr(name, hexValue) { let definition = CSR_DEFINITIONS[name]; if (!definition) { if (name.startsWith('pmpaddr')) { definition = { shortName: name, name: `PMP Address ${name.substring(7)}`, doc: `Address for PMP entry ${name.substring(7)}.` }; } else return null; } const intValue = BigInt('0x' + hexValue); const bitLength = Math.max(32, hexValue.length * 4); const binValue = intValue.toString(2).padStart(bitLength, '0'); let fields = []; if (definition.fields) { fields = definition.fields.map(field => { let value; if (field.bits.length === 1) { value = (intValue >> BigInt(field.bits[0])) & 1n; } else { const [start, end] = field.bits; const mask = (1n << BigInt(end - start + 1)) - 1n; value = (intValue >> BigInt(start)) & mask; } value = Number(value); let meaning = field.values ? (field.values[value] || `Unknown (${value})`) : value.toString(); if (name === 'misa' && field.name === 'Extensions') { meaning = ''; for (let i = 0; i < 26; i++) { if ((value >> i) & 1) { meaning += String.fromCharCode('A'.charCodeAt(0) + i); } } } else if (name === 'mcause' && field.name === 'Exception Code') { const isInterrupt = (intValue >> BigInt(bitLength - 1)) & 1n; meaning = isInterrupt ? (INTERRUPT_CODES[value] || `Reserved/Custom (${value})`) : (EXCEPTION_CODES[value] || `Reserved/Custom (${value})`); } else if (name === 'mtvec' && field.name === 'BASE') { meaning = `0x${(BigInt(value) << 2n).toString(16).padStart(8, '0')}`; } return { name: field.name, desc: field.desc, bits: field.bits, value: value, meaning: meaning }; }); } else if (definition.type === 'pmpcfg') { const pmpIndexStart = parseInt(name.replace('pmpcfg', ''), 10) * (bitLength / 8); for (let i = 0; i < (bitLength / 8); i++) { const byte = Number((intValue >> BigInt(i * 8)) & 0xFFn); const r = (byte >> 0) & 1; const w = (byte >> 1) & 1; const x = (byte >> 2) & 1; const a = (byte >> 3) & 3; const l = (byte >> 7) & 1; fields.push({ name: `PMP[${pmpIndexStart + i}]`, desc: `Config for pmpaddr${pmpIndexStart + i}`, bits: [i*8, i*8+7], value: `0x${byte.toString(16).padStart(2, '0')}`, meaning: `R:${r} W:${w} X:${x} A:${PMP_A_MODES[a]} L:${l}` }); } fields.reverse(); } return { name, hexValue, binValue, definition, fields }; }
+        function generateNotableInfo(name, hexValue) { const notes = []; const intValue = BigInt('0x' + hexValue); const bitLength = Math.max(32, hexValue.length * 4); switch (name) { case 'mcause': if (intValue !== 0n) { const isInterrupt = (intValue >> BigInt(bitLength - 1)) & 1n; const code = intValue & ((1n << BigInt(bitLength - 1)) - 1n); const causeText = isInterrupt ? (INTERRUPT_CODES[Number(code)] || `Custom Interrupt (${code})`) : (EXCEPTION_CODES[Number(code)] || `Custom Exception (${code})`); if (isInterrupt) { notes.push({ level: 'warn', message: `🔔 Interrupt Occurred: ${causeText}` }); } else { notes.push({ level: 'error', message: `🚨 Exception Occurred: ${causeText}` }); } } break; case 'mtval': if (intValue !== 0n) { notes.push({ level: 'warn', message: `ℹ️ Trap Value (mtval) is set to 0x${hexValue}. This may indicate a faulting address or bad instruction.` }); } break; case 'mstatus': const fs = (intValue >> 13n) & 3n; if (fs === 3n) { notes.push({ level: 'warn', message: `🟡 Floating-point unit status (FS) is Dirty. State must be saved on context switch.` }); } break; case 'mip': if (intValue !== 0n) { notes.push({ level: 'warn', message: `🟡 Interrupts are pending (mip). Check the 'mie' register to see if they are enabled.` }); } break; case 'dcsr': const cause = (intValue >> 6n) & 7n; if (cause !== 0n) { const causeMap = {1: "ebreak", 2: "Trigger module", 3: "Debug interrupt", 4: "Step"}; notes.push({ level: 'info', message: `🔵 Entered Debug Mode. Reason: "${causeMap[Number(cause)] || 'Unknown'}".` }); } break; } return notes; }
+        function createCsrCard(analysis) { const { name, hexValue, binValue, definition, fields } = analysis; const card = document.createElement('div'); card.className = 'bg-gray-800 p-5 rounded-lg shadow-md border border-gray-700'; const notableNotes = generateNotableInfo(name, hexValue); const notesHtml = notableNotes.map(note => `<div class="note-box note-${note.level}">${note.message}</div>`).join(''); const fieldHtml = fields.length > 0 ? `<div class="mt-4 space-y-2 text-sm">${fields.map(field => `<div class="grid grid-cols-1 md:grid-cols-12 gap-2 border-t border-gray-700 pt-2"><div class="font-semibold text-gray-200 md:col-span-3">${field.name}</div><div class="text-gray-400 md:col-span-9"><span class="font-mono bg-gray-700 px-2 py-1 rounded text-xs mr-2">val: ${field.value}</span>${field.meaning}</div></div>`).join('')}</div>` : ''; card.innerHTML = ` <div class="flex justify-between items-baseline"> <h3 class="text-xl font-semibold text-blue-400">${definition.name} (${definition.shortName})</h3> <span class="font-mono text-lg text-gray-300">0x${hexValue}</span> </div> <p class="text-sm text-gray-400 mt-1">${definition.doc}</p> ${notesHtml} <div class="mt-4"> ${fields.length > 0 ? createBitVisualization(binValue, fields) : ''} </div> ${fieldHtml} `; return card; }
+        function createBitVisualization(binValue, fields) { const bitLength = binValue.length; let html = '<div class="bit-viz">'; for (let i = 0; i < bitLength; i++) { const bitIndex = bitLength - 1 - i; const bitValue = binValue[i]; const field = fields.find(f => { if (!f.bits) return false; if (f.bits.length === 1) return f.bits[0] === bitIndex; return bitIndex >= f.bits[0] && bitIndex <= f.bits[1]; }); const tooltipText = field ? `<b>Bit ${bitIndex}</b><br>Field: ${field.name}<br>${field.desc}` : `<b>Bit ${bitIndex}</b> (Unused/Reserved)`; html += `<div class="bit-box ${bitValue === '1' ? 'one' : 'zero'}" title="Bit ${bitIndex}">${bitValue}<span class="tooltip">${tooltipText}</span></div>`; } html += '</div>'; return html; }
+        function createPmpVisualization(pmpData) { const container = document.createElement('div'); container.className = "bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-3"; const entries = []; for (let i = 0; i < 16; i++) { const cfgRegName = `pmpcfg${Math.floor(i / 4)}`; const addrRegName = `pmpaddr${i}`; if (!pmpData.cfgs[cfgRegName] || pmpData.addrs[addrRegName] === undefined) continue; const cfgRegVal = BigInt('0x' + pmpData.cfgs[cfgRegName]); const byteIndex = i % 4; const cfg = Number((cfgRegVal >> BigInt(byteIndex * 8)) & 0xFFn); const r = (cfg >> 0) & 1; const w = (cfg >> 1) & 1; const x = (cfg >> 2) & 1; const a = (cfg >> 3) & 3; const l = (cfg >> 7) & 1; if (a === 0) continue; const addr = BigInt('0x' + pmpData.addrs[addrRegName]); let base = 0n, size = 0n; if (a === 1) { const prevAddr = i > 0 ? BigInt('0x' + (pmpData.addrs[`pmpaddr${i-1}`] || '0')) : 0n; base = prevAddr << 2n; size = (addr - prevAddr) << 2n; } else if (a === 2) { base = addr << 2n; size = 4n; } else if (a === 3) { let k = 0; while (((addr >> BigInt(k)) & 1n) === 1n) { k++; } base = (addr & ~((1n << BigInt(k + 1)) - 1n)) << 2n; size = (1n << BigInt(k + 3)) - (1n << BigInt(k + 2)); } if (size > 0) { entries.push({ index: i, base, size, r, w, x, a, l }); } } if (entries.length === 0) { container.innerHTML = `<p class="text-gray-400">No active PMP entries found.</p>`; return container; } container.innerHTML = ` <div class="grid grid-cols-6 gap-2 text-sm font-semibold text-gray-400 border-b border-gray-600 pb-2"> <span>Entry</span> <span>Base Address</span> <span>End Address</span> <span>Size</span> <span>Mode</span> <span>Permissions</span> </div> ${entries.map(e => ` <div class="grid grid-cols-6 gap-2 text-sm font-mono items-center"> <span>PMP[${e.index}]</span> <span>0x${e.base.toString(16)}</span> <span>0x${(e.base + e.size - 1n).toString(16)}</span> <span class="text-gray-400">${e.size >= 1024*1024 ? `${e.size/(1024n*1024n)}MB` : (e.size >= 1024 ? `${e.size/1024n}KB` : `${e.size}B`)}</span> <span class="text-gray-400">${PMP_A_MODES[e.a]} ${e.l ? ' L' : ''}</span> <div class="flex gap-1"> <span class="px-2 rounded ${e.r ? 'bg-blue-500 text-white' : 'bg-gray-600 text-gray-400'}">R</span> <span class="px-2 rounded ${e.w ? 'bg-red-500 text-white' : 'bg-gray-600 text-gray-400'}">W</span> <span class="px-2 rounded ${e.x ? 'bg-green-500 text-white' : 'bg-gray-600 text-gray-400'}">X</span> </div> </div> `).join('')} `; return container; }
+        function createGprGrid(data) { const container = document.createElement('div'); container.className = 'bg-gray-800 p-4 rounded-lg border border-gray-700'; const grid = document.createElement('div'); grid.className = 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-6 gap-y-3 font-mono text-sm'; GPR_ORDER.forEach(key => { if (data[key] !== undefined) { const isNonZero = key !== 'zero' && BigInt('0x' + data[key]) !== 0n; const item = document.createElement('div'); item.className = 'flex justify-between border-b border-gray-700 pb-1'; item.innerHTML = `<span class="text-gray-400 mr-2">${key.padEnd(5, ' ')}:</span><span class="text-gray-200 ${isNonZero ? 'gpr-highlight' : ''}">${data[key]}</span>`; grid.appendChild(item); } }); container.appendChild(grid); return container; }
+        function shareUrl() { const text = inputArea.value; if (!text.trim()) return; try { const compressed = pako.deflate(text); const base64 = btoa(String.fromCharCode.apply(null, compressed)); const urlSafeBase64 = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''); const url = `${window.location.protocol}//${window.location.host}${window.location.pathname}?data=${urlSafeBase64}`; const dummy = document.createElement('textarea'); document.body.appendChild(dummy); dummy.value = url; dummy.select(); document.execCommand('copy'); document.body.removeChild(dummy); shareNotification.style.opacity = '1'; setTimeout(() => { shareNotification.style.opacity = '0'; }, 2000); } catch (e) { console.error("Failed to generate URL:", e); alert("Failed to generate URL."); } }
+    </script>
+</body>
+</html>
